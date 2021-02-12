@@ -65,7 +65,7 @@ fi
 
 list() {
 	while read -r; do
-		[[ ! $REPLY =~ ^\#.* ]] && printf '%s\n' "$REPLY"
+		[[ ! $REPLY =~ ^(|\#.*)$ ]] && printf '%s\n' "$REPLY"
 	done < "$WATCHLIST"
 }
 
@@ -93,7 +93,7 @@ check() {
 	fi
 
 	while read -r Line; do
-		if [[ ! $Line =~ ^\#.* ]]; then
+		if [[ ! $Line =~ ^(|\#.*)$ ]]; then
 			data=($Line)
 			url=${data[0]}
 			filter=${data[*]:1}
