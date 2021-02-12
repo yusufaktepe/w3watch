@@ -1,123 +1,174 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Dependencies:
+#   bash, coreutils, diffutils, curl, lynx
 
 DRYRUN=false
-ROOTDIR="${HOME}/.w3watch"
-CACHEDIR="${ROOTDIR}/cache"
-LOCKFILE="${ROOTDIR}/lock"
-CONFIGFILE="${ROOTDIR}/config"
-CONFIGSAMPLE='/usr/share/doc/w3watch/config.sample'
-LYNX='/usr/bin/lynx --connect_timeout 10 --read_timeout 10 -stderr'
-
-if [ ! -d "${ROOTDIR}" ]; then
-	install -D "${CONFIGSAMPLE}" "${CONFIGFILE}"
-	mkdir -p "${CACHEDIR}"
-fi
-
-if [ ! -r "${CONFIGFILE}" ]; then
-	echo "${CONFIGFILE} not found!"
-	exit 1
-fi
-
-if [ ! -d "${CACHEDIR}" ]; then
-	mkdir -p "${CACHEDIR}"
-fi
-
-if [ -r "${LOCKFILE}" ]; then
-	echo "w3watch is locked by ${LOCKFILE}"
-	exit 1
-fi
-
-touch "${LOCKFILE}"
-
-
-quit() {
-	rm -f "${LOCKFILE}"
-	exit $1
-}
+VERBOSE=true
+SCRIPT=${0##*/}
+CONFIG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/$SCRIPT
+CACHE_DIR=$CONFIG_DIR/cache
+LOCK_FILE=/tmp/$SCRIPT.lock
+WATCHLIST=$CONFIG_DIR/watchlist
+BROWSER_CMD='lynx --connect_timeout 10 --read_timeout 10 -stderr -dump -nonumbers'
 
 usage() {
-	echo "usage: ${0} [option]"
-	echo 'options:'
-	echo '	-e	edit config'
-	echo '	-l	list config'
-	echo '	-d	dump output and discard any changes'
-	echo '	-c	check for updates'
-	echo ''
+	while read -r; do
+		printf '%b\n' "$REPLY"
+	done <<-EOF
+		\rUsage: $SCRIPT [OPT]
+
+		\r  -e    - Edit watchlist with \$EDITOR
+		\r  -l    - List watchlist
+		\r  -d    - Dump output and discard any changes
+		\r  -c    - Check for updates (Default)
+		\r  -h    - Display this help information
+		\r
+	EOF
+	exit 1
 }
 
-edit() {
-	${EDITOR} "${CONFIGFILE}"
-	return $?
-}
+if [ ! -r "$WATCHLIST" ]; then
+	mkdir -p "$CACHE_DIR"
+
+	while read -r; do
+		printf '%s\n' "$REPLY"
+	done <<-EOF > "$WATCHLIST"
+		# $SCRIPT watchlist
+		#
+		# * Lines starting with a # will be ignored
+		# * Every line contains one URL
+		# * An optional filter can be defined by separating any command
+		#   from the url using whitspaces
+		# * Prepend an @ to the URL to work on bare HTML source
+		#
+		# Example:
+		#
+		# Watch a complete web page:
+		#http://www.archlinux.org
+		#
+		# You are only interested in xorg related updates?
+		# Pipe the page through a grep command.
+		#http://www.archlinux.org	grep -i 'xorg'
+		#
+		# Note: You can use any command which accepts a website dump on stdin and
+		#       prints its filtered output to stdout
+		#
+	EOF
+
+	printf '%b\n\n' ":: Sample watchlist file created at '$WATCHLIST'.
+		\r:: You can add URLs to this file and run the script again to initiate the watch."
+	usage
+	exit 1
+fi
+
+[ ! -d "$CACHE_DIR" ] && mkdir -p "$CACHE_DIR"
 
 list() {
-	grep '^[^#]' "${CONFIGFILE}"
+	while read -r; do
+		[[ ! $REPLY =~ ^\#.* ]] && printf '%s\n' "$REPLY"
+	done < "$WATCHLIST"
+}
+
+differ() {
+	LastMod=$(stat -c '%y' "$1")
+	diff --color=auto -u \
+		--label "Changes from $LastMod" "$1" \
+		--label "$2" -
+	ret=$?
+
+	case $ret in
+		1) printf '\n' ;;
+		0) $VERBOSE && printf ':: \e[3m%s\e[0m\n' "No changes for '$2' since ${LastMod%.*}" ;;
+	esac
+
+	return $ret
 }
 
 check() {
-	grep '^[^#]' "${CONFIGFILE}" | while read line; do
-		data=(${line})
-		url="${data[0]}"
-		filter="${data[@]:1}"
+	if [ -e "$LOCK_FILE" ]; then
+		printf '%s\n' "$SCRIPT is locked by $LOCK_FILE"
+		exit 1
+	else
+		touch "$LOCK_FILE"
+	fi
 
-		if echo "$url}" | grep -q '^@'; then
-			url="$(echo "${url}" | cut -c 1 --complement -)"
-			dump=$($LYNX -source "$url")
-		else
-			dump=$($LYNX -dump -nonumbers "$url")
-		fi
+	while read -r Line; do
+		if [[ ! $Line =~ ^\#.* ]]; then
+			data=($Line)
+			url=${data[0]}
+			filter=${data[*]:1}
 
-		if [ $? -ne 0 ]; then
-			echo "$url failed" >&2
-			continue
-		fi
+			if [[ $url =~ ^@.* ]]; then
+				url=${url:1}
+				dump=$(curl -Ls "$url")
+			else
+				dump=$($BROWSER_CMD "$url" 2>/dev/null)
+			fi
+			ret=$?
 
-		if [ "${filter}" != "" ]; then
-			dump=$(echo "${dump}" | eval "${filter}")
-		fi
-
-		if $DRYRUN; then
-			echo "$dump"
-		else
-			sum=$(echo "${line}" | sha1sum | awk '{print $1;}')
-			cachefile="${CACHEDIR}/${sum}"
-
-			if [ -f "$cachefile" ]; then
-				echo "$dump" | diff -u \
-					--label "local copy from $(/usr/bin/stat --printf='%y' ${cachefile})" "$cachefile" \
-					--label "${url}" - \
-				|| echo
+			if [ $ret -ne 0 ]; then
+				printf '\e[3;31m%s\e[0m\n' ":: Failed to connect to '$url'" >&2
+				continue
 			fi
 
-			echo "$dump" > "$cachefile"
+			# Pipe output to a command if specified
+			if [ -n "$filter" ]; then
+				FLine="${data[0]} | $filter"
+				dump=$(eval "$filter" <<< "$dump")
+			fi
+
+			if $DRYRUN; then
+				printf '\e[3;35m%s\e[0m\n%s\n\n' \
+					":: Dumping output of '$FLine'" "$dump"
+			else
+				sum=$(sha1sum <<< "$Line")
+				sum=${sum%% *}
+				watchlistSums+=("$sum") # to compare later
+
+				cachefile="$CACHE_DIR/$sum"
+
+				if [ -f "$cachefile" ]; then
+					differ "$cachefile" "$url" <<< "$dump" ||
+						printf '%s\n' "$dump" > "$cachefile"
+				else
+					printf '%s\n' "$dump" > "$cachefile"
+					$VERBOSE && printf ':: \e[3m%s\e[0m\n' \
+						"Added '$url' to the watchlist"
+				fi
+			fi
 		fi
-	done
+	done < "$WATCHLIST"
 }
 
 collectGarbage() {
-	for cacheEntry in "${CACHEDIR}/"*; do
-		cacheSum=$(basename "$cacheEntry")
+	# Collect checksums from cache files
+	for cacheEntry in "$CACHE_DIR/"*; do
+		cacheSums+=("${cacheEntry##*/}")
+	done
 
-		grep '^[^#]' "${CONFIGFILE}" | while read configEntry; do
-			configSum=$(echo "$configEntry" | sha1sum | awk '{print $1;}')
+	# Compare cache checksums against watchlist's to find orphans
+	for cacheEntry in "${cacheSums[@]}"; do
+		skip=
+		for watchlistEntry in "${watchlistSums[@]}"; do
+			[ "$cacheEntry" = "$watchlistEntry" ] && { skip=1; break; }
+		done
+		[ -n "$skip" ] || garbage+=("$cacheEntry")
+	done
 
-			if [ "$cacheSum" == "$configSum" ]; then
-				return 1
-			fi
-		done && rm -f $cacheEntry
+	for garbage in "${garbage[@]}"; do
+		rm -f "$CACHE_DIR/$garbage"
 	done
 }
 
+# Remove $LOCK_FILE on exit/interrupt
+trap 'rm -f "$LOCK_FILE"' INT EXIT QUIT ABRT TERM
 
-while getopts 'eldc' option; do
-	case $option in
-		e)	edit; quit $?;;
-		l)	list; quit 0;;
-		d)	DRYRUN=true; check; quit 0;;
-		c)	check; collectGarbage; quit 0;;
-		*)	usage; quit -1;;
-	esac
-done
+case $1 in
+	-e) $EDITOR "$WATCHLIST" ;;
+	-l) list; exit 0 ;;
+	-d) DRYRUN=true check ;;
+	-c|"") check; collectGarbage ;;
+	-h) usage ;;
+	*) printf '%s\n\n' "Incorrect option(s) specified."; usage; exit 1 ;;
+esac
 
-usage
-quit -1

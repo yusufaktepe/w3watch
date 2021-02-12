@@ -1,16 +1,19 @@
-V=1.0.3
+V=1.1.0
+PREFIX=/usr/local
 
 all:
 
+clean:
+	rm -f w3watch-$(V).tar.gz w3watch-$(V).tar.gz.sig
+
 install:
-	install -D -m755 w3watch $(DESTDIR)/usr/bin/w3watch
-	install -D -m644 config.sample $(DESTDIR)/usr/share/doc/w3watch/config.sample
+	install -Dm755 w3watch -t $(DESTDIR)$(PREFIX)/bin
 
 uninstall:
-	rm $(DESTDIR)/usr/bin/w3watch
-	rm $(DESTDIR)/usr/share/doc/w3watch/config.sample
-	rmdir $(DESTDIR)/usr/share/doc/w3watch/
+	rm -f $(DESTDIR)$(PREFIX)/bin/w3watch
 
-dist:
+dist: clean
 	git archive --format=tar --prefix=w3watch-$(V)/ $(V) | gzip -9 > w3watch-$(V).tar.gz
 	gpg --detach-sign --use-agent w3watch-$(V).tar.gz
+
+.PHONY: all clean dist install uninstall
