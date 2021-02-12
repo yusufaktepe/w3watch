@@ -94,7 +94,7 @@ check() {
 
 	while read -r Line; do
 		if [[ ! $Line =~ ^(|\#.*)$ ]]; then
-			data=($Line)
+			read -ra data <<< "$Line"
 			url=${data[0]}
 			filter=${data[*]:1}
 
